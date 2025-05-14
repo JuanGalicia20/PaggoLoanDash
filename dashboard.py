@@ -9,134 +9,128 @@ from datetime import datetime, timedelta
 
 from lib.lib import consulta
 
+# Colores de marca
+PRIMARY_COLOR = "#4ACDCE"
+SECONDARY_COLOR = "#E044A7"
+TERTIARY_COLOR = "#5266B0"
+
+# ——— Login ———
+def login():
+    st.title("Iniciar sesión")
+    email = st.text_input("Correo electrónico")
+    password = st.text_input("Contraseña", type="password")
+    login_button = st.button("Entrar")
+
+    if login_button:
+        if (
+            email in st.secrets["usuarios"]
+            and password == st.secrets["usuarios"][email]
+        ):
+            st.session_state["logueado"] = True
+            st.rerun()
+        else:
+            st.error("Credenciales incorrectas. Inténtalo de nuevo.")
+
+# Inicializar estado de sesión
+if "logueado" not in st.session_state:
+    st.session_state["logueado"] = False
+
+# Asegurar autenticación antes de continuar
+if not st.session_state["logueado"]:
+    login()
+    st.stop()
+
 # Configuración de página
 st.set_page_config(
-    page_title="Simulador Avanzado de Préstamos Paggo", 
+    page_title="Simulador Avanzado de Préstamos Paggo",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Estilos CSS personalizados
-st.markdown("""
+# Estilos CSS personalizados con colores de marca
+st.markdown(f"""
 <style>
-    .main-header {
-        font-size: 2.3rem;
-        font-weight: 700;
-        color: #1E3A8A;
-        margin-bottom: 1rem;
-    }
-    .subheader {
-        font-size: 1.5rem;
-        font-weight: 600;
-        color: #2563EB;
-        margin-top: 1rem;
-        margin-bottom: 0.5rem;
-    }
-    .card {
-        background-color: #F3F4F6;
-        border-radius: 8px;
-        padding: 1rem;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24);
-    }
-    .metric-title {
-        font-size: 1rem;
-        font-weight: 500;
-        color: #6B7280;
-    }
-    .metric-value {
-        font-size: 1.8rem;
-        font-weight: 700;
-        color: #1E3A8A;
-    }
-    .metric-change {
-        font-size: 0.8rem;
-        font-weight: 500;
-    }
-    .positive-change {
-        color: #10B981;
-    }
-    .negative-change {
-        color: #EF4444;
-    }
-    .neutral-change {
-        color: #6B7280;
-    }
+    .main-header {{ font-size: 2.3rem; font-weight: 700; color: {PRIMARY_COLOR}; margin-bottom: 1rem; }}
+    .subheader {{ font-size: 1.5rem; font-weight: 600; color: {SECONDARY_COLOR}; margin-top: 1rem; margin-bottom: 0.5rem; }}
+    .card {{ background-color: #F3F4F6; border-radius: 8px; padding: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24); }}
+    .metric-title {{ font-size: 1rem; font-weight: 500; color: #6B7280; }}
+    .metric-value {{ font-size: 1.8rem; font-weight: 700; color: {PRIMARY_COLOR}; }}
+    .metric-change {{ font-size: 0.8rem; font-weight: 500; }}
+    .positive-change {{ color: #10B981; }}
+    .negative-change {{ color: #EF4444; }}
+    .neutral-change {{ color: {TERTIARY_COLOR}; }}
 </style>
 """, unsafe_allow_html=True)
 
 # Título principal
-st.markdown('<div class="main-header">Simulador Avanzado de Préstamos de Capital de Trabajo</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="main-header">Simulador Avanzado de Préstamos de Capital de Trabajo</div>', unsafe_allow_html=True)
 
-
-# Cargar datos
-@st.cache_data(ttl=3600)  # Cache por 1 hora
+# Cargar datos (cache por 1 hora)
+@st.cache_data(ttl=3600)
 def load_transaction_data():
-    pagos_sql = st.secrets["query_negocios"]["query1"]
-    return consulta(pagos_sql)
+    return consulta(st.secrets["query_negocios"]["query1"])
 
-# Carga de datos iniciales
 with st.spinner('Cargando datos de transacciones...'):
     df = load_transaction_data()
-
 if df.empty:
     st.error("No se pudieron cargar los datos o no hay información disponible.")
     st.stop()
 
-# Convertir fechaAfiliacion a datetime
+# Preprocesar fechas
 df['fechaAfiliacion'] = pd.to_datetime(df['fechaAfiliacion'])
 
-# Sidebar: Parámetros del préstamo y filtros
+# Sidebar: Configuración del préstamo
 st.sidebar.markdown('<div class="subheader">Configuración del Préstamo</div>', unsafe_allow_html=True)
-
-# Parámetros de préstamo
-loan_params_container = st.sidebar.container()
-with loan_params_container:
+with st.sidebar.container():
     loan_amount = st.slider("Monto del préstamo (Q)", 8000, 12000, 10000, step=1000)
     term_months = st.selectbox("Plazo (meses)", [3, 6, 9, 12], index=1)
     interest_rate = st.slider("Tasa de interés anual (%)", 12.0, 60.0, 36.0, step=1.0) / 100.0
-    monthly_interest = interest_rate / 12
-    
+    monthly_interest = interest_rate / 12.0
     repayment_type = st.radio("Tipo de cuota", ["Fija", "Decreciente"])
-    
-    # Cálculo de cuota mensual (sin considerar retención)
+
     if repayment_type == "Fija":
+        # Cuota fija según fórmula estándar
         monthly_payment = loan_amount * (monthly_interest * (1 + monthly_interest)**term_months) / ((1 + monthly_interest)**term_months - 1)
     else:
-        # Para cuota decreciente, calculamos el capital mensual constante
+        # Cuota decreciente: comenzando con la más alta
         principal_payment = loan_amount / term_months
-        # El primer pago incluirá los intereses sobre el monto total
-        first_month_interest = loan_amount * monthly_interest
-        monthly_payment = principal_payment + first_month_interest
+        payments_schedule = []
+        remaining_balance = loan_amount
+        for _ in range(term_months):
+            interest_payment = remaining_balance * monthly_interest
+            payment_m = principal_payment + interest_payment
+            payments_schedule.append(payment_m)
+            remaining_balance -= principal_payment
+        monthly_payment = payments_schedule[0]
 
-    # Mostrar cuota mensual equivalente
-    st.info(f"Cuota mensual equivalente: Q {monthly_payment:.2f}")
+    st.info(f"Cuota mensual {'inicial ' if repayment_type=='Decreciente' else ''}equivalente: Q {monthly_payment:.2f}")
 
+# Sidebar: Configuración de Retención
 st.sidebar.markdown('<div class="subheader">Configuración de Retención</div>', unsafe_allow_html=True)
-
-# Configuración de retención
-retention_container = st.sidebar.container()
-with retention_container:
-    if repayment_type == "Fija":
-        retention_rate = st.slider("% Retención sobre ventas", 1, 30, 10) / 100.0
-        retention_schedule = np.repeat(retention_rate, term_months)
-    else:
-        init_rate = st.slider("% Retención inicial", 1, 30, 15) / 100.0
-        final_rate = st.slider("% Retención final", 1, int(init_rate*100), 5) / 100.0
-        retention_schedule = np.linspace(init_rate, final_rate, term_months)
-    
-    # Uso de plataforma (% de ventas que pasan por la plataforma)
+with st.sidebar.container():
+    # Retención fija independientemente del tipo de cuota
+    retention_rate = st.slider("% Retención sobre ventas", 1, 30, 10) / 100.0
+    retention_schedule = np.repeat(retention_rate, term_months)
     platform_share = st.slider("% de ventas que pasan por la plataforma", 50, 100, 70) / 100.0
 
+# Sidebar: Supuestos de Riesgo
 st.sidebar.markdown('<div class="subheader">Supuestos de Riesgo</div>', unsafe_allow_html=True)
-
-# Parámetros de riesgo
-risk_container = st.sidebar.container()
-with risk_container:
+with st.sidebar.container():
     PD = st.slider("PD - Probabilidad de Default (%)", 0, 30, 10) / 100.0
+    st.caption("Probabilidad de que un negocio no cumpla con sus pagos y entre en mora.")
+
     LGD = st.slider("LGD - Pérdida dada Default (%)", 50, 100, 90) / 100.0
+    st.caption("Porcentaje de la exposición que se pierde cuando ocurre un default.")
+
     cost_of_funds = st.slider("Coste de fondeo anual (%)", 1, 20, 8) / 100.0
+    st.caption("Tasa de interés que pagamos por los fondos que prestamos.")
+
     operational_cost = st.slider("Gastos operativos por préstamo (Q)", 0, 500, 150)
+    st.caption("Costos administrativos y operativos asociados a originar y gestionar el préstamo.")
+
     min_roi = st.slider("ROI mínimo esperado (%)", 5, 50, 15) / 100.0
+    st.caption("Retorno mínimo que esperamos obtener sobre el capital prestado.")
+
 
 st.sidebar.markdown('<div class="subheader">Criterios de Calificación</div>', unsafe_allow_html=True)
 
