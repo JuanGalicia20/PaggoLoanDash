@@ -13,6 +13,7 @@ PRIMARY_COLOR = "#4ACDCE"
 SECONDARY_COLOR = "#E044A7"
 TERTIARY_COLOR = "#5266B0"
 
+
 # ——— Login ———
 def login():
     st.title("Iniciar sesión")
@@ -64,6 +65,30 @@ st.markdown(f"""
 # Título principal
 st.markdown(f'<div class="main-header">Simulador Avanzado de Préstamos de Capital de Trabajo</div>', unsafe_allow_html=True)
 
+# Cargar datos de riesgo MCC
+@st.cache_data(ttl=3600)
+def load_mcc_risk_data():
+    """
+    Carga los datos de riesgo por MCC desde CSV o base de datos
+    """
+    # Opción 1: Si tienes el CSV subido
+    try:
+        # Si el CSV está en el sistema de archivos
+        mcc_risk = pd.read_csv('mcc_risk.csv')
+        return mcc_risk
+    except:
+        # Opción 2: Datos hardcodeados como fallback
+        mcc_risk_data = {
+            'MCC': [7230, 7994, 5532],
+            'Descripción': ['Sala de belleza', 'Videojuegos', 'Venta de neumáticos'],
+            'Probabilidad': ['Bajo', 'Bajo', 'Bajo'],
+            'Consecuencia': ['Menor', 'Moderado', 'Mayor'],
+            'Calificación': [2, 4, 8],
+            'Nivel de riesgo': ['', '', '']
+        }
+        return pd.DataFrame(mcc_risk_data)
+
+
 # Cargar datos (cache por 1 hora)
 @st.cache_data(ttl=3600)
 def load_transaction_data():
@@ -71,12 +96,31 @@ def load_transaction_data():
 
 with st.spinner('Cargando datos de transacciones...'):
     df = load_transaction_data()
+    df_mcc_risk = load_mcc_risk_data()
 if df.empty:
     st.error("No se pudieron cargar los datos o no hay información disponible.")
     st.stop()
 
+df['codigoMcc'] = df['codigoMcc'].astype(int)
+df_mcc_risk['MCC'] = df_mcc_risk['MCC'].astype(int)
+
+# Combinar con datos de riesgo MCC
+df = df.merge(
+    df_mcc_risk[['MCC', 'Calificación', 'Nivel de riesgo', 'Probabilidad', 'Consecuencia']], 
+    left_on='codigoMcc', 
+    right_on='MCC', 
+    how='left'
+)
+print(df.head())
+
+# Llenar valores faltantes con riesgo medio por defecto
+df['Calificación'] = df['Calificación'].fillna(5)  # Riesgo medio por defecto
+df['Nivel de riesgo'] = df['Nivel de riesgo'].fillna('Medio')
+df['Probabilidad'] = df['Probabilidad'].fillna('Medio')
+df['Consecuencia'] = df['Consecuencia'].fillna('Moderado')
 # Preprocesar fechas
 df['fechaAfiliacion'] = pd.to_datetime(df['fechaAfiliacion'])
+
 
 # Sidebar: Configuración del préstamo
 st.sidebar.markdown('<div class="subheader">Configuración del Préstamo</div>', unsafe_allow_html=True)
@@ -117,11 +161,21 @@ st.sidebar.markdown('<div class="subheader">Supuestos de Riesgo</div>', unsafe_a
 with st.sidebar.container():
     PD = st.slider("PD - Probabilidad de Default (%)", 0, 30, 10) / 100.0
     st.caption("Probabilidad de que un negocio no cumpla con sus pagos y entre en mora.")
+    st.caption("Probabilidad base de default antes de ajustes por MCC.")
+    
+    # Multiplicadores por nivel de riesgo MCC
+    st.subheader("Multiplicadores de Riesgo por MCC")
+    
+    # Crear multiplicadores basados en la calificación de riesgo
+    risk_multiplier_low = st.slider("Multiplicador Riesgo Bajo (Calif. 1-3)", 0.5, 1.5, 0.8, 0.1)
+    risk_multiplier_medium = st.slider("Multiplicador Riesgo Medio (Calif. 4-6)", 0.8, 2.0, 1.0, 0.1)
+    risk_multiplier_high = st.slider("Multiplicador Riesgo Alto (Calif. 7-10)", 1.0, 3.0, 1.5, 0.1)
+    
 
-    LGD = st.slider("LGD - Pérdida dada Default (%)", 50, 100, 90) / 100.0
+    LGD = st.slider("LGD - Pérdida dada Default (%)", 0, 100, 90) / 100.0
     st.caption("Porcentaje de la exposición que se pierde cuando ocurre un default.")
 
-    cost_of_funds = st.slider("Coste de fondeo anual (%)", 1, 20, 8) / 100.0
+    cost_of_funds = st.slider("Coste de fondeo anual (%)", 0, 20, 8) / 100.0
     st.caption("Tasa de interés que pagamos por los fondos que prestamos.")
 
     operational_cost = st.slider("Gastos operativos por préstamo (Q)", 0, 500, 150)
@@ -224,6 +278,25 @@ def calculate_required_sales(amortization_df, retention_schedule, platform_share
 
     return pd.DataFrame(monthly_requirements)
 
+def calculate_adjusted_pd(df, base_pd, risk_mult_low, risk_mult_medium, risk_mult_high):
+    """Calcula PD ajustada por riesgo MCC"""
+    def get_multiplier(calificacion):
+        if pd.isna(calificacion):
+            return risk_mult_medium  # Default medio
+        elif calificacion <= 3:
+            return risk_mult_low
+        elif calificacion <= 6:
+            return risk_mult_medium
+        else:
+            return risk_mult_high
+    
+    df['risk_multiplier'] = df['Calificación'].apply(get_multiplier)
+    df['adjusted_pd'] = base_pd * df['risk_multiplier']
+    
+    # Asegurar que no exceda 100%
+    df['adjusted_pd'] = df['adjusted_pd'].clip(upper=1.0)
+    
+    return df
 
 # Filtrar negocios que califican
 def filter_qualifying_businesses(df, min_months_active, min_weeks_active, monthly_threshold, min_antiguedad):
@@ -234,13 +307,14 @@ def filter_qualifying_businesses(df, min_months_active, min_weeks_active, monthl
         (df['antiguedad_meses'] >= min_antiguedad)
     ]
 
+df = calculate_adjusted_pd(df, PD, risk_multiplier_low, risk_multiplier_medium, risk_multiplier_high)
 # Ejecutar filtrado
 df_qualify = filter_qualifying_businesses(df, min_months_active, min_weeks_active, monthly_threshold, min_antiguedad)
 
 # KPIs principales
 total_principal = len(df_qualify) * loan_amount
 total_interest = monthly_payment * term_months * len(df_qualify) - total_principal
-expected_loss = total_principal * PD * LGD
+expected_loss = (df_qualify['adjusted_pd'] * LGD * loan_amount).sum()
 total_operational_costs = operational_cost * len(df_qualify)
 cost_of_funds_total = (cost_of_funds / 12) * total_principal * term_months
 
@@ -385,6 +459,57 @@ with tab1:
     )
     
     st.plotly_chart(fig, use_container_width=True)
+
+    # Después de los gráficos de actividad y municipio
+    st.markdown('<div class="subheader">Análisis de Riesgo por MCC</div>', unsafe_allow_html=True)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        # Distribución de niveles de riesgo
+        risk_dist = df_qualify['Nivel de riesgo'].value_counts()
+        
+        fig = px.pie(
+            values=risk_dist.values,
+            names=risk_dist.index,
+            title="Distribución por Nivel de Riesgo MCC"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        # PD promedio por nivel de riesgo
+        pd_by_risk = df_qualify.groupby('Nivel de riesgo')['adjusted_pd'].mean().reset_index()
+        
+        fig = px.bar(
+            pd_by_risk,
+            x='Nivel de riesgo',
+            y='adjusted_pd',
+            title="PD Promedio por Nivel de Riesgo",
+            labels={'adjusted_pd': 'PD Ajustada (%)'}
+        )
+        fig.update_layout(yaxis_tickformat='.1%')
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Tabla de riesgo detallada
+    st.markdown('<div class="subheader">Resumen de Riesgo por MCC</div>', unsafe_allow_html=True)
+
+    risk_summary = df_qualify.groupby(['codigoMcc', 'Nivel de riesgo', 'Calificación']).agg({
+        'nombre_negocio': 'count',
+        'adjusted_pd': 'mean',
+        'avg_monthly_sales': 'mean'
+    }).rename(columns={
+        'nombre_negocio': 'Cantidad Negocios',
+        'adjusted_pd': 'PD Promedio',
+        'avg_monthly_sales': 'Ventas Promedio'
+    }).reset_index()
+
+    st.dataframe(
+        risk_summary.style.format({
+            'PD Promedio': '{:.2%}',
+            'Ventas Promedio': 'Q{:,.0f}'
+        }),
+        use_container_width=True
+    )
 
 with tab2:
     col1, col2, col3, col4 = st.columns(4)
@@ -650,3 +775,30 @@ with tab3:
             use_container_width=True,
             height=600   # ajusta la altura si lo ves muy comprimido
         )
+    
+    # En tab3, actualiza las columnas
+    cols = [
+        'nombre_negocio',
+        'avg_monthly_sales',
+        'meses_activos',
+        'semanas_activas',
+        'antiguedad_meses',
+        'codigoMcc',
+        'Nivel de riesgo',
+        'Calificación',
+        'adjusted_pd'
+    ]
+
+    # Formatear la tabla
+    display_df = df_qualify[cols].copy()
+    display_df['adjusted_pd'] = display_df['adjusted_pd'].apply(lambda x: f"{x:.2%}")
+    display_df.rename(columns={
+        'adjusted_pd': 'PD Ajustada (%)',
+        'Calificación': 'Calif. Riesgo'
+    }, inplace=True)
+
+    st.dataframe(
+        display_df.reset_index(drop=True),
+        use_container_width=True,
+        height=600
+    )

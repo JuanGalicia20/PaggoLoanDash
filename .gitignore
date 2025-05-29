@@ -1,2 +1,1 @@
-*.csv
 .streamlit/secrets.toml
