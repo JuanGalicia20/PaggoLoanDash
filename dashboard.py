@@ -181,7 +181,7 @@ with st.sidebar.container():
     operational_cost = st.slider("Gastos operativos por préstamo (Q)", 0, 500, 150)
     st.caption("Costos administrativos y operativos asociados a originar y gestionar el préstamo.")
 
-    min_roi = st.slider("ROI mínimo esperado (%)", 5, 50, 15) / 100.0
+    min_roi = st.slider("ROI mínimo esperado (%)", 1, 50, 15) / 100.0
     st.caption("Retorno mínimo que esperamos obtener sobre el capital prestado.")
 
 
