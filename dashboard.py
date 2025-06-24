@@ -130,12 +130,14 @@ with st.sidebar.container():
     interest_rate = st.slider("Tasa de interés anual (%)", 12.0, 60.0, 36.0, step=1.0) / 100.0
     monthly_interest = interest_rate / 12.0
     repayment_type = st.radio("Tipo de cuota", ["Fija", "Decreciente"])
-
+    
+    # NUEVO: Selector de periodicidad de cuota
+    payment_frequency = st.selectbox("Periodicidad de cuota", ["Mensual", "Quincenal", "Semanal", "Diaria"])
+    
+    # Calcular cuota base mensual
     if repayment_type == "Fija":
-        # Cuota fija según fórmula estándar
         monthly_payment = loan_amount * (monthly_interest * (1 + monthly_interest)**term_months) / ((1 + monthly_interest)**term_months - 1)
     else:
-        # Cuota decreciente: comenzando con la más alta
         principal_payment = loan_amount / term_months
         payments_schedule = []
         remaining_balance = loan_amount
@@ -145,17 +147,37 @@ with st.sidebar.container():
             payments_schedule.append(payment_m)
             remaining_balance -= principal_payment
         monthly_payment = payments_schedule[0]
+    
+    # NUEVO: Calcular cuota según periodicidad
+    if payment_frequency == "Mensual":
+        display_payment = monthly_payment
+        frequency_multiplier = 1
+    elif payment_frequency == "Quincenal":
+        display_payment = monthly_payment / 2
+        frequency_multiplier = 2
+    elif payment_frequency == "Semanal":
+        display_payment = monthly_payment / 4
+        frequency_multiplier = 4
+    else:  # Diaria
+        display_payment = monthly_payment / 30
+        frequency_multiplier = 30
+    
+    st.info(f"Cuota {payment_frequency.lower()} {'inicial ' if repayment_type=='Decreciente' else ''}equivalente: Q {display_payment:.2f}")
 
-    st.info(f"Cuota mensual {'inicial ' if repayment_type=='Decreciente' else ''}equivalente: Q {monthly_payment:.2f}")
 
 # Sidebar: Configuración de Retención
 st.sidebar.markdown('<div class="subheader">Configuración de Retención</div>', unsafe_allow_html=True)
 with st.sidebar.container():
-    # Retención fija independientemente del tipo de cuota
     retention_rate = st.slider("% Retención sobre ventas", 1, 30, 10) / 100.0
     retention_schedule = np.repeat(retention_rate, term_months)
     platform_share = st.slider("% de ventas que pasan por la plataforma", 50, 100, 70) / 100.0
+    
+    # NUEVO: Costo de desembolso
+    disbursement_cost = st.slider("Costo de desembolso (Q)", 0, 500, 100)
+    charge_client_disbursement = st.checkbox("Cobrar costo de desembolso al cliente", value=False)
 
+
+# Sidebar: Supuestos de Riesgo
 # Sidebar: Supuestos de Riesgo
 st.sidebar.markdown('<div class="subheader">Supuestos de Riesgo</div>', unsafe_allow_html=True)
 with st.sidebar.container():
@@ -163,14 +185,9 @@ with st.sidebar.container():
     st.caption("Probabilidad de que un negocio no cumpla con sus pagos y entre en mora.")
     st.caption("Probabilidad base de default antes de ajustes por MCC.")
     
-    # Multiplicadores por nivel de riesgo MCC
-    st.subheader("Multiplicadores de Riesgo por MCC")
-    
-    # Crear multiplicadores basados en la calificación de riesgo
     risk_multiplier_low = st.slider("Multiplicador Riesgo Bajo (Calif. 1-3)", 0.5, 1.5, 0.8, 0.1)
     risk_multiplier_medium = st.slider("Multiplicador Riesgo Medio (Calif. 4-6)", 0.8, 2.0, 1.0, 0.1)
     risk_multiplier_high = st.slider("Multiplicador Riesgo Alto (Calif. 7-10)", 1.0, 3.0, 1.5, 0.1)
-    
 
     LGD = st.slider("LGD - Pérdida dada Default (%)", 0, 100, 90) / 100.0
     st.caption("Porcentaje de la exposición que se pierde cuando ocurre un default.")
@@ -184,15 +201,29 @@ with st.sidebar.container():
     min_roi = st.slider("ROI mínimo esperado (%)", 5, 50, 15) / 100.0
     st.caption("Retorno mínimo que esperamos obtener sobre el capital prestado.")
 
-
 st.sidebar.markdown('<div class="subheader">Criterios de Calificación</div>', unsafe_allow_html=True)
-
-# Criterios de calificación adicionales
 criteria_container = st.sidebar.container()
 with criteria_container:
     min_months_active = st.slider("Meses activos mínimos (de los últimos 6)", 1, 6, 6)
     min_weeks_active = st.slider("Semanas activas mínimas (de las últimas 26)", 4, 26, 20)
     min_antiguedad = st.slider("Antigüedad mínima (meses)", 6, 24, 6)
+    
+    # NUEVO: Filtro de cantidad de transacciones
+    min_transactions = st.slider("Transacciones mínimas (últimos 6 meses)", 0, 1000, 50)
+    
+    # NUEVO: Filtro de vista por fecha específica
+    st.markdown("**Simulación por fecha específica**")
+    enable_date_filter = st.checkbox("Evaluar hasta fecha específica")
+    if enable_date_filter:
+        specific_date = st.date_input(
+            "Fecha de evaluación",
+            value=datetime.now().date(),
+            min_value=datetime.now().date() - timedelta(days=365),
+            max_value=datetime.now().date()
+        )
+    else:
+        specific_date = None
+
 
 # Cálculo umbral de facturación
 total_retention_avg = sum(retention_schedule) / len(retention_schedule)
@@ -299,29 +330,148 @@ def calculate_adjusted_pd(df, base_pd, risk_mult_low, risk_mult_medium, risk_mul
     return df
 
 # Filtrar negocios que califican
-def filter_qualifying_businesses(df, min_months_active, min_weeks_active, monthly_threshold, min_antiguedad):
-    return df[
+def filter_qualifying_businesses(df, min_months_active, min_weeks_active, monthly_threshold, min_antiguedad, min_transactions, specific_date=None):
+    filtered_df = df[
         (df['meses_activos'] >= min_months_active) & 
         (df['semanas_activas'] >= min_weeks_active) & 
         (df['avg_monthly_sales'] >= monthly_threshold) &
-        (df['antiguedad_meses'] >= min_antiguedad)
+        (df['antiguedad_meses'] >= min_antiguedad) &
+        (df['avg_monthly_transactions'] >= min_transactions)
     ]
+    
+    # NUEVO: Filtro por fecha específica
+    if specific_date:
+        specific_datetime = pd.to_datetime(specific_date)
+        # Filtrar negocios que ya existían en la fecha específica
+        filtered_df = filtered_df[filtered_df['fechaAfiliacion'] <= specific_datetime]
+        
+        # Calcular antigüedad hasta la fecha específica
+        filtered_df = filtered_df.copy()
+        filtered_df['antiguedad_hasta_fecha'] = (specific_datetime - filtered_df['fechaAfiliacion']).dt.days / 30
+        filtered_df = filtered_df[filtered_df['antiguedad_hasta_fecha'] >= min_antiguedad]
+    
+    return filtered_df
+
+def generate_amortization_schedule_multi_frequency(loan_amount, monthly_interest, term_months, repayment_type, payment_frequency):
+    schedule = []
+    remaining_balance = loan_amount
+    
+    # Determinar número de períodos y tasa por período
+    if payment_frequency == "Mensual":
+        periods = term_months
+        period_interest = monthly_interest
+        periods_per_month = 1
+    elif payment_frequency == "Quincenal":
+        periods = term_months * 2
+        period_interest = monthly_interest / 2
+        periods_per_month = 2
+    elif payment_frequency == "Semanal":
+        periods = term_months * 4
+        period_interest = monthly_interest / 4
+        periods_per_month = 4
+    else:  # Diaria
+        periods = term_months * 30
+        period_interest = monthly_interest / 30
+        periods_per_month = 30
+    
+    if repayment_type == "Fija":
+        payment = loan_amount * (period_interest * (1 + period_interest)**periods) / ((1 + period_interest)**periods - 1)
+        for period in range(1, periods + 1):
+            interest_payment = remaining_balance * period_interest
+            principal_payment = payment - interest_payment
+            remaining_balance -= principal_payment
+            
+            if period == periods:
+                principal_payment += remaining_balance
+                remaining_balance = 0
+                
+            schedule.append({
+                'period': period,
+                'payment': payment,
+                'principal': principal_payment,
+                'interest': interest_payment,
+                'remaining_balance': remaining_balance,
+                'month_equivalent': period / periods_per_month
+            })
+    else:  # Cuota decreciente
+        principal_payment = loan_amount / periods
+        for period in range(1, periods + 1):
+            interest_payment = remaining_balance * period_interest
+            payment = principal_payment + interest_payment
+            remaining_balance -= principal_payment
+            
+            schedule.append({
+                'period': period,
+                'payment': payment,
+                'principal': principal_payment,
+                'interest': interest_payment,
+                'remaining_balance': remaining_balance,
+                'month_equivalent': period / periods_per_month
+            })
+    
+    return pd.DataFrame(schedule)
+
+def calculate_required_sales_multi_frequency(amortization_df, retention_schedule, platform_share, payment_frequency):
+    periods_per_month = {"Mensual": 1, "Quincenal": 2, "Semanal": 4, "Diaria": 30}[payment_frequency]
+    
+    try:
+        schedule = list(retention_schedule)
+    except TypeError:
+        schedule = [float(retention_schedule)] * len(amortization_df)
+    
+    monthly_requirements = []
+    for _, row in amortization_df.iterrows():
+        period = int(row['period'])
+        payment = float(row['payment'])
+        month_equiv = row['month_equivalent']
+        
+        # Usar la tasa de retención del mes correspondiente
+        month_idx = min(int(month_equiv) - 1 if int(month_equiv) > 0 else 0, len(schedule) - 1)
+        month_idx = max(0, month_idx)
+        retention_rate = schedule[month_idx]
+        
+        # Calcular ventas requeridas por período
+        required_period_sales = payment / (retention_rate * platform_share)
+        
+        monthly_requirements.append({
+            'period': period,
+            'payment': payment,
+            'retention_rate': retention_rate,
+            'required_sales': required_period_sales,
+            'month_equivalent': month_equiv,
+            'frequency': payment_frequency
+        })
+
+    return pd.DataFrame(monthly_requirements)
+
+
 
 df = calculate_adjusted_pd(df, PD, risk_multiplier_low, risk_multiplier_medium, risk_multiplier_high)
-# Ejecutar filtrado
-df_qualify = filter_qualifying_businesses(df, min_months_active, min_weeks_active, monthly_threshold, min_antiguedad)
+df_qualify = filter_qualifying_businesses(df, min_months_active, min_weeks_active, monthly_threshold, min_antiguedad, min_transactions, specific_date)
+
+# Preparación de datos para amortización con nueva periodicidad
+amortization_df = generate_amortization_schedule_multi_frequency(loan_amount, monthly_interest, term_months, repayment_type, payment_frequency)
+required_sales_df = calculate_required_sales_multi_frequency(amortization_df, retention_schedule, platform_share, payment_frequency)
 
 # KPIs principales
 total_principal = len(df_qualify) * loan_amount
 total_interest = monthly_payment * term_months * len(df_qualify) - total_principal
+total_disbursement_cost = disbursement_cost * len(df_qualify)
+if charge_client_disbursement:
+    # Si se cobra al cliente, no afecta el revenue
+    net_disbursement_cost = 0
+else:
+    # Si no se cobra al cliente, se resta del revenue
+    net_disbursement_cost = total_disbursement_cost
 expected_loss = (df_qualify['adjusted_pd'] * LGD * loan_amount).sum()
 total_operational_costs = operational_cost * len(df_qualify)
 cost_of_funds_total = (cost_of_funds / 12) * total_principal * term_months
 
 # ROI y tasa de equilibrio
-net_income = total_interest - expected_loss - total_operational_costs - cost_of_funds_total
+net_income = total_interest - expected_loss - total_operational_costs - cost_of_funds_total - net_disbursement_cost
 roi = net_income / total_principal if total_principal > 0 else 0
-break_even_rate = (((cost_of_funds / 12) * term_months) + (operational_cost / loan_amount) + (PD * LGD)) / (1 - PD)
+break_even_rate = (((cost_of_funds / 12) * term_months) + (operational_cost / loan_amount) + (net_disbursement_cost / len(df_qualify) / loan_amount if len(df_qualify) > 0 else 0) + (PD * LGD)) / (1 - PD)
+
 
 # Crear dos pestañas para separar los análisis
 tab1, tab2, tab3 = st.tabs(["📊 Análisis de Cartera", "💰 Rentabilidad y Amortización", "🧮 Negocios Calificados"])
@@ -403,11 +553,14 @@ with tab1:
     with col4:
         st.markdown(f"""
         <div class="card">
-            <div class="metric-title">Costos Operativos</div>
-            <div class="metric-value">Q {total_operational_costs:,.0f}</div>
-            <div class="metric-change neutral-change">Q {operational_cost:.0f} por préstamo</div>
+            <div class="metric-title">Costo Desembolso</div>
+            <div class="metric-value">Q {total_disbursement_cost:,.0f}</div>
+            <div class="metric-change {'neutral-change' if charge_client_disbursement else 'negative-change'}">
+                {'Cliente paga' if charge_client_disbursement else 'Absorbe empresa'} (Q {disbursement_cost:.0f} c/u)
+            </div>
         </div>
         """, unsafe_allow_html=True)
+
     
     st.markdown('<div class="subheader">Distribución por Segmentos</div>', unsafe_allow_html=True)
     
@@ -590,6 +743,30 @@ with tab2:
             barmode='stack',
             height=400
         )
+
+        # Actualizar título de gráficos para reflejar periodicidad
+        # Gráfico de amortización (actualizado)
+        amort_fig.update_layout(
+            title=f'Desglose de Pagos {payment_frequency}es',
+            xaxis_title=f'Período ({payment_frequency})',
+            yaxis_title='Monto (Q)',
+            barmode='stack',
+            height=400
+        )
+
+
+
+    # Actualizar tabla de amortización con nuevas columnas
+        display_cols = {
+            'period': f'Período ({payment_frequency})',
+            'payment': 'Cuota (Q)',
+            'principal': 'Principal (Q)',
+            'interest': 'Interés (Q)',
+            'remaining_balance': 'Saldo Restante (Q)',
+            'month_equivalent': 'Mes Equivalente',
+            'retention_rate': 'Tasa Retención (%)',
+            'required_sales': 'Ventas Requeridas (Q)'
+        }
         
         st.plotly_chart(amort_fig, use_container_width=True)
     
